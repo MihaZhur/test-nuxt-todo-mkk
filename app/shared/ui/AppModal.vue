@@ -117,3 +117,76 @@ onBeforeUnmount(() => {
     </Transition>
   </Teleport>
 </template>
+
+<style scoped lang="scss">
+.modal-backdrop {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(18, 27, 21, .55);
+  backdrop-filter: blur(5px);
+}
+
+.modal {
+  width: min(100%, 470px);
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+  border-radius: 20px;
+  background: #fff;
+  box-shadow: 0 24px 90px rgba(13, 22, 16, .3);
+  outline: none;
+}
+
+.modal__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 23px 24px 0;
+
+  h2 {
+    margin: 0;
+    font-size: 1.5rem;
+    font-weight: 700;
+  }
+}
+
+.modal__body { padding: 16px 24px 24px; }
+
+.modal__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  padding: 16px 24px 22px;
+  border-top: 1px solid #edf0ed;
+}
+
+.modal-enter-active,
+.modal-leave-active {
+  transition: opacity .18s ease;
+
+  .modal { transition: transform .18s ease, opacity .18s ease; }
+}
+
+.modal-enter-from,
+.modal-leave-to {
+  opacity: 0;
+
+  .modal {
+    opacity: 0;
+    transform: translateY(8px) scale(.98);
+  }
+}
+
+@media (max-width: 600px) {
+  .modal__footer {
+    align-items: stretch;
+    flex-direction: column-reverse;
+
+    :deep(.app-button) { width: 100%; }
+  }
+}
+</style>

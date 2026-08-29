@@ -1,19 +1,25 @@
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import type { Note, NoteDraftSchema, TodoItem } from '~/types/note'
 import type { EditOperation } from '~/shared/lib/edit-history'
 import { cloneNote } from '~/shared/lib/clone'
 import { EditHistory } from '~/shared/lib/edit-history'
 import { createId } from '~/shared/lib/id'
+import { classifyExternalNoteChange, isDraftStale } from '~/shared/lib/note-conflict'
 import { readDraft, removeDraft, writeDraft } from '~/shared/lib/notes-storage'
 import { useNotesStore } from '~/stores/notes'
 
 const TEXT_COMMIT_DELAY = 700
 const DRAFT_SAVE_DELAY = 900
 
-function makeEmptyNote(): Note {
+interface NoteEditorOptions {
+  draftRouteId?: string
+  newNoteId?: string
+}
+
+function makeEmptyNote(id = createId()): Note {
   const now = new Date().toISOString()
   return {
-    id: createId(),
+    id,
     title: '',
     todos: [],
     createdAt: now,
@@ -21,12 +27,13 @@ function makeEmptyNote(): Note {
   }
 }
 
-export function useNoteEditor(routeId: string) {
+export function useNoteEditor(routeId: string, options: NoteEditorOptions = {}) {
   const store = useNotesStore()
   const isNew = routeId === 'new'
+  const draftRouteId = options.draftRouteId ?? routeId
   const source = isNew ? undefined : store.getById(routeId)
   const existedAtStart = Boolean(source)
-  const initial = source ? cloneNote(source) : makeEmptyNote()
+  const initial = source ? cloneNote(source) : makeEmptyNote(options.newNoteId)
   const note = reactive<Note>(cloneNote(initial))
   const baseline = ref(cloneNote(initial))
   const history = new EditHistory(50)
@@ -35,6 +42,7 @@ export function useNoteEditor(routeId: string) {
   const recoveryResolved = ref(false)
   const draftSavedAt = ref<string | null>(null)
   const externallyDeleted = ref(false)
+  const externallyUpdated = ref(false)
   const pendingText = new Map<string, string>()
   const textTimers = new Map<string, ReturnType<typeof setTimeout>>()
   let draftTimer: ReturnType<typeof setTimeout> | undefined
@@ -52,7 +60,7 @@ export function useNoteEditor(routeId: string) {
   const isMissing = computed(() => !isNew && !existedAtStart)
 
   if (import.meta.client) {
-    recoveryDraft.value = readDraft(window.localStorage, routeId)
+    recoveryDraft.value = readDraft(window.localStorage, draftRouteId)
     recoveryResolved.value = !recoveryDraft.value
   }
 
@@ -148,17 +156,20 @@ export function useNoteEditor(routeId: string) {
 
   function restoreDraft() {
     if (!recoveryDraft.value) return
+    const currentSource = isNew ? undefined : store.getById(routeId)
+    const stale = !isNew && isDraftStale(recoveryDraft.value.baseUpdatedAt, currentSource)
     Object.assign(note, cloneNote(recoveryDraft.value.note))
-    baseline.value = source ? cloneNote(source) : cloneNote(initial)
+    baseline.value = currentSource ? cloneNote(currentSource) : cloneNote(initial)
     draftSavedAt.value = recoveryDraft.value.savedAt
     recoveryDraft.value = null
     recoveryResolved.value = true
     history.clear()
     bumpHistory()
+    externallyUpdated.value = stale
   }
 
   function discardDraft() {
-    if (import.meta.client) removeDraft(window.localStorage, routeId)
+    if (import.meta.client) removeDraft(window.localStorage, draftRouteId)
     recoveryDraft.value = null
     recoveryResolved.value = true
   }
@@ -171,7 +182,7 @@ export function useNoteEditor(routeId: string) {
     textTimers.clear()
     history.clear()
     bumpHistory()
-    if (import.meta.client) removeDraft(window.localStorage, routeId)
+    if (import.meta.client) removeDraft(window.localStorage, draftRouteId)
   }
 
   function markSaved(saved: Note) {
@@ -183,25 +194,59 @@ export function useNoteEditor(routeId: string) {
   watch(
     () => store.getById(routeId),
     current => {
-      if (!isNew && existedAtStart && !current) externallyDeleted.value = true
+      if (isNew || !sessionActive) return
+      const change = classifyExternalNoteChange(
+        existedAtStart,
+        current,
+        baseline.value.updatedAt,
+        isDirty.value
+      )
+
+      if (change === 'deleted') externallyDeleted.value = true
+      if (change === 'conflict') externallyUpdated.value = true
+      if (change === 'refresh' && current) {
+        Object.assign(note, cloneNote(current))
+        baseline.value = cloneNote(current)
+        history.clear()
+        bumpHistory()
+      }
     }
   )
+
+  function persistDraft() {
+    if (draftTimer) clearTimeout(draftTimer)
+    draftTimer = undefined
+    if (!import.meta.client || !sessionActive || !recoveryResolved.value || isMissing.value || !isDirty.value) return
+
+    writeDraft(
+      window.localStorage,
+      draftRouteId,
+      note,
+      isNew ? null : baseline.value.updatedAt
+    )
+    draftSavedAt.value = new Date().toISOString()
+  }
 
   watch(
     note,
     () => {
       if (!import.meta.client || !sessionActive || !recoveryResolved.value || isMissing.value) return
       if (draftTimer) clearTimeout(draftTimer)
-      draftTimer = setTimeout(() => {
-        writeDraft(window.localStorage, routeId, note, source?.updatedAt ?? null)
-        draftSavedAt.value = new Date().toISOString()
-      }, DRAFT_SAVE_DELAY)
+      if (!isDirty.value) {
+        removeDraft(window.localStorage, draftRouteId)
+        draftSavedAt.value = null
+        return
+      }
+      draftTimer = setTimeout(persistDraft, DRAFT_SAVE_DELAY)
     },
     { deep: true }
   )
 
+  onMounted(() => window.addEventListener('pagehide', persistDraft))
+
   onBeforeUnmount(() => {
-    if (draftTimer) clearTimeout(draftTimer)
+    persistDraft()
+    window.removeEventListener('pagehide', persistDraft)
     for (const timer of textTimers.values()) clearTimeout(timer)
   })
 
@@ -212,6 +257,7 @@ export function useNoteEditor(routeId: string) {
     isDirty,
     isMissing,
     externallyDeleted,
+    externallyUpdated,
     recoveryDraft,
     recoveryResolved,
     draftSavedAt,
